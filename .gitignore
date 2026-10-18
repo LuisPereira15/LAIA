@@ -1,0 +1,14 @@
+# Data (Later versioned with DVC)
+  data/
+  *.csv
+
+  .venv/
+  venv/
+
+
+  # MLflow local runs
+  mlruns/
+  mlartifacts/
+
+  # Local settings
+  .env
