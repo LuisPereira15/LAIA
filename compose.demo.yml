@@ -1,0 +1,12 @@
+# Explicitly synthetic, isolated from the normal project's volumes.
+name: laia-demo
+services:
+  train:
+    command: ["--demo", "--output-dir", "/models/demo"]
+  api:
+    environment:
+      MODEL_PATH: /models/demo/model.joblib
+      ALLOW_SYNTHETIC_MODEL: "true"
+  verify:
+    environment:
+      EXPECTED_DATA_KIND: synthetic

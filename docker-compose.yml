@@ -1,0 +1,95 @@
+name: laia
+
+x-common: &common
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  mlflow:
+    <<: *common
+    build:
+      context: .
+      target: mlflow
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow_store:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+    restart: unless-stopped
+
+  train:
+    <<: *common
+    profiles: [training]
+    build:
+      context: .
+      target: train
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      DATA_VERSION: ${DATA_VERSION:-not-set}
+    volumes:
+      - ./data:/data:ro
+      - model_store:/models
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    command: ["--help"]
+
+  api:
+    <<: *common
+    build:
+      context: .
+      target: api
+    environment:
+      MODEL_PATH: ${MODEL_PATH:-/models/candidate/model.joblib}
+      ALLOW_SYNTHETIC_MODEL: "false"
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - model_store:/models:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  test:
+    <<: *common
+    profiles: [test]
+    build:
+      context: .
+      target: test
+
+  verify:
+    <<: *common
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    entrypoint: ["python", "-m", "scripts.verify_stack"]
+    environment:
+      API_URL: http://api:8000
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      EXPECTED_DATA_KIND: prepared
+    depends_on:
+      api:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+
+volumes:
+  mlflow_store:
+  model_store:

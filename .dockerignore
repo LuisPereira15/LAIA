@@ -1,0 +1,13 @@
+**
+!src/
+!src/**
+!requirements/
+!requirements/**
+!tests/
+!tests/**
+!scripts/
+!scripts/verify_stack.py
+!Dockerfile
+!pyproject.toml
+**/__pycache__/
+**/*.pyc
