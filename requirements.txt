@@ -1,3 +1,2 @@
-# Development environment, including tests and the training client.
-# Locked files are generated for Python 3.12 on Linux (the container target).
--r requirements/test.txt
+# Add the Python dependencies needed by the project here.
+# This initial environment contains Python and pip only.
