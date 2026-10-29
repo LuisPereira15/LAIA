@@ -1,5 +1,6 @@
 # Data (Later versioned with DVC)
   data/
+  /src/data/
   *.csv
 
   .venv/
