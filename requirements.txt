@@ -1,0 +1,2 @@
+# Add the Python dependencies needed by the project here.
+# This initial environment contains Python and pip only.

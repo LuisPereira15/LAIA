@@ -1,0 +1,6 @@
+services:
+  dev:
+    build: .
+    init: true
+    volumes:
+      - .:/app

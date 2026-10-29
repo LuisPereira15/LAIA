@@ -1,15 +1,23 @@
 # Data (Later versioned with DVC)
-  data/
-  /src/data/
-  *.csv
+data/
+/src/data/
+*.csv
 
-  .venv/
-  venv/
+# Virtual environments
+.venv/
+venv/
 
+# Python cache
+__pycache__/
+*.py[cod]
 
-  # MLflow local runs
-  mlruns/
-  mlartifacts/
+# MLflow local runs
+mlruns/
+mlartifacts/
 
-  # Local settings
-  .env
+# Artifacts
+/artifacts/
+
+# Local settings
+.env
+.env.*

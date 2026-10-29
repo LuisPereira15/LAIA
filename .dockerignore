@@ -1,0 +1,11 @@
+.git/
+data/
+artifacts/
+.venv/
+venv/
+**/__pycache__/
+**/*.pyc
+.env
+.env.*
+*.csv
+Enunciado.pdf
