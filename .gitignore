@@ -15,9 +15,6 @@ __pycache__/
 mlruns/
 mlartifacts/
 
-# Artifacts
-/artifacts/
-
 # Local settings
 .env
 .env.*
