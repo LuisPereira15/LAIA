@@ -1,6 +1,7 @@
-# Train and compare models, test the best one on 2023 data, and save it in MLflow.
+"""Train and compare models, test the best one on 2023 data, and save it in MLflow."""
 
 import argparse
+from collections.abc import Iterable, Iterator
 import hashlib
 import importlib.metadata
 import json
@@ -22,20 +23,24 @@ from mlflow.tracking import MlflowClient
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, clone
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import ParameterGrid
+from sklearn.pipeline import Pipeline
 
 from src.preprocessing.pipeline import build_pipeline, feature_columns, to_bts_frame
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+EvaluationResult = tuple[dict, dict, np.ndarray]
 
-def load_config(path=None):
+
+def load_config(path: Path | None = None) -> dict:
+    """Load the YAML config, apply environment variable overrides and validate it."""
     with open(path or PROJECT_ROOT / 'src/config/config.yaml', encoding='utf-8') as stream:
         config = yaml.safe_load(stream)
     for key in ['tracking_uri', 'experiment_name', 'model_name']:
@@ -56,7 +61,8 @@ def load_config(path=None):
     return config
 
 
-def validate_config(config):
+def validate_config(config: dict) -> None:
+    """Raise ValueError if the config is inconsistent or unsupported."""
     data = config['data']
     if data['train_year'] >= data['test_year']:
         raise ValueError('train_year must precede test_year')
@@ -76,11 +82,17 @@ def validate_config(config):
         raise ValueError('minimum_improvement_over_dummy must be nonnegative')
 
 
-def data_path(config):
+def data_path(config: dict) -> Path:
+    """Return the absolute path of the processed CSV."""
     return PROJECT_ROOT / config['data']['processed_path']
 
 
-def partition_mask(df, config, partition):
+def partition_mask(df: pd.DataFrame, config: dict, partition: str) -> pd.Series:
+    """Return a boolean mask selecting the rows of a temporal partition.
+
+    Partitions: train (train year, before validation month), validation
+    (train year, from validation month), refit (whole train year), test (test year).
+    """
     d = config['data']
     year = df['YEAR']
     if partition == 'test':
@@ -95,8 +107,12 @@ def partition_mask(df, config, partition):
     raise ValueError(f'Unknown partition: {partition}')
 
 
-def inventory(config):
-    # Count strata without loading features or materializing the full CSV
+def inventory(config: dict) -> dict[str, dict[str, int]]:
+    """Count rows per class in each partition, reading the CSV in chunks.
+
+    Also checks that labels, years and months are valid and that every
+    partition contains every class.
+    """
     target = config['features']['target']
     classes = config['features']['target_classes']
     counts = {p: {c: 0 for c in classes} for p in ['train', 'validation', 'refit', 'test']}
@@ -121,7 +137,8 @@ def inventory(config):
     return counts
 
 
-def iter_partition(config, partition):
+def iter_partition(config: dict, partition: str) -> Iterator[pd.DataFrame]:
+    """Yield the rows of a partition chunk by chunk."""
     cols = list(dict.fromkeys(['YEAR'] + feature_columns(config) + [config['features']['target']]))
     for chunk in pd.read_csv(data_path(config), usecols=cols, chunksize=config['data']['chunksize']):
         subset = chunk.loc[partition_mask(chunk, config, partition)]
@@ -129,8 +146,12 @@ def iter_partition(config, partition):
             yield subset
 
 
-def stratified_quotas(counts, size):
-    # Largest-remainder allocation, keeping each class and an exact sample size
+def stratified_quotas(counts: dict[str, int], size: int) -> dict[str, int]:
+    """Split a sample size across classes in proportion to their counts.
+
+    Uses largest-remainder allocation so the total is exact and every
+    class gets at least one row.
+    """
     total = sum(counts.values())
     size = min(size, total)
     if size < len(counts):
@@ -146,13 +167,17 @@ def stratified_quotas(counts, size):
     return quotas
 
 
-def sample_partition(config, partition, counts, size):
-    # Read the CSV in chunks and take a random sample from each class.
-    # Spread the sample across chunks so rows near the start are not favoured.
+def sample_partition(config: dict, partition: str, counts: dict[str, int], size: int | None) -> pd.DataFrame:
+    """Draw a stratified random sample of a partition without loading the whole CSV.
 
+    Each chunk contributes a hypergeometric share of each class quota, so
+    rows near the start of the file are not favoured. Use size=None for
+    the full partition.
+    """
     remaining_population = dict(counts)
     remaining_quota = stratified_quotas(counts, sum(counts.values()) if size is None else size)
     target = config['features']['target']
+    # Different seed offset per partition so samples are independent but reproducible.
     offsets = {'train': 0, 'validation': 1, 'refit': 2, 'test': 3}
     rng = np.random.default_rng(config['data']['random_seed'] + offsets[partition])
     parts = []
@@ -170,7 +195,11 @@ def sample_partition(config, partition, counts, size):
     return result.iloc[rng.permutation(len(result))].reset_index(drop=True)
 
 
-def metrics_from_confusion(cm, classes):
+def metrics_from_confusion(cm: np.ndarray, classes: list[str]) -> tuple[dict[str, float], dict[str, dict]]:
+    """Compute global and per-class metrics from a confusion matrix.
+
+    Returns a flat metrics dict (for MLflow) and a classification report dict.
+    """
     support = cm.sum(axis=1)
     predicted = cm.sum(axis=0)
     tp = cm.diagonal()
@@ -198,7 +227,8 @@ def metrics_from_confusion(cm, classes):
     return metrics, report
 
 
-def evaluate(model, batches, config):
+def evaluate(model: Pipeline, batches: Iterable[pd.DataFrame], config: dict) -> EvaluationResult:
+    """Predict batch by batch and return (metrics, report, confusion matrix)."""
     classes = config['features']['target_classes']
     target = config['features']['target']
     cm = np.zeros((len(classes), len(classes)), dtype=np.int64)
@@ -213,12 +243,14 @@ def evaluate(model, batches, config):
     return metrics, report, cm
 
 
-def frame_batches(frame, config):
+def frame_batches(frame: pd.DataFrame, config: dict) -> Iterator[pd.DataFrame]:
+    """Split an in-memory DataFrame into chunksize batches."""
     size = config['data']['chunksize']
     return (frame.iloc[i:i + size] for i in range(0, len(frame), size))
 
 
-def log_evaluation(result, prefix, classes):
+def log_evaluation(result: EvaluationResult, prefix: str, classes: list[str]) -> None:
+    """Log metrics, confusion matrix (JSON and PNG) and report to the active MLflow run."""
     metrics, report, cm = result
     mlflow.log_metrics({f'{prefix}_{k}': v for k, v in metrics.items()})
     mlflow.log_dict({'labels': classes, 'matrix': cm.tolist()}, f'{prefix}/confusion_matrix.json')
@@ -239,7 +271,8 @@ def log_evaluation(result, prefix, classes):
     plt.close(fig)
 
 
-def dataset_sha256(path):
+def dataset_sha256(path: Path) -> str:
+    """Return the SHA256 hash of a file, used to fingerprint the dataset."""
     digest = hashlib.sha256()
     with open(path, 'rb') as stream:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
@@ -247,12 +280,14 @@ def dataset_sha256(path):
     return digest.hexdigest()
 
 
-def get_model_instance(model_type, params):
+def get_model_instance(model_type: str, params: dict) -> BaseEstimator:
+    """Create a classifier from its config type name and parameters."""
     models = {'RandomForestClassifier': RandomForestClassifier, 'LogisticRegression': LogisticRegression}
     return models[model_type](**params)
 
 
-def fit_with_warnings(pipeline, frame, config):
+def fit_with_warnings(pipeline: Pipeline, frame: pd.DataFrame, config: dict) -> bool:
+    """Fit the pipeline, log warnings and fit time to MLflow, and return True if it converged."""
     started = time.perf_counter()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always', ConvergenceWarning)
@@ -266,7 +301,17 @@ def fit_with_warnings(pipeline, frame, config):
     return not any(issubclass(w.category, ConvergenceWarning) for w in caught)
 
 
-def train_all_models(config, commit_sha=None):
+def train_all_models(config: dict, commit_sha: str | None = None) -> dict:
+    """Run the full training workflow and register the best model in MLflow.
+
+    Steps: train a dummy baseline, grid-search every enabled model on the
+    validation split, pick the best converged one, refit it on the full
+    train year, evaluate once on the test year, verify the saved model
+    reloads, then register it with the 'staging' and 'commit-<sha>' aliases.
+
+    Returns:
+        A summary dict, also saved to MLflow and to the local output dir.
+    """
     commit = commit_sha or os.getenv('COMMIT_SHA')
     if not commit or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', commit):
         raise ValueError('COMMIT_SHA is required and must use letters, digits, dot, underscore or hyphen')
@@ -284,7 +329,8 @@ def train_all_models(config, commit_sha=None):
     validation = (sample_partition(config, 'validation', counts['validation'], cfg['validation_sample_size'])
                   if cfg['validation_sample_size'] is not None else None)
 
-    def validation_batches():
+    def validation_batches() -> Iterator[pd.DataFrame]:
+        """Use the in-memory sample if there is one, otherwise stream the full partition."""
         return frame_batches(validation, config) if validation is not None else iter_partition(config, 'validation')
 
     common_tags = {'commit_sha': commit, 'training_group': group, 'dataset_sha256': fingerprint}
@@ -331,7 +377,8 @@ def train_all_models(config, commit_sha=None):
     test = (sample_partition(config, 'test', counts['test'], cfg['test_sample_size'])
             if cfg['test_sample_size'] is not None else None)
 
-    def test_batches():
+    def test_batches() -> Iterator[pd.DataFrame]:
+        """Use the in-memory sample if there is one, otherwise stream the full partition."""
         return frame_batches(test, config) if test is not None else iter_partition(config, 'test')
 
     with mlflow.start_run(run_name=f'final_{commit[:7]}', tags={**common_tags, 'role': 'final', 'selected_run_id': best['run_id']}) as run:
@@ -400,7 +447,8 @@ def train_all_models(config, commit_sha=None):
     return summary
 
 
-def main():
+def main() -> None:
+    """CLI entry point: parse --config and run training."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, help='Alternative YAML config')
     args = parser.parse_args()

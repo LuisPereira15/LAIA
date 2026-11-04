@@ -17,4 +17,9 @@ mlartifacts/
 
 # Local settings
 .env
-.env.*
+
+# MLflow local backend
+mlflow.db
+
+# Local training outputs (source of truth is MLflow)
+artifacts/training/
