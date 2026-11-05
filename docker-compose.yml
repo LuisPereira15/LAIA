@@ -2,5 +2,8 @@ services:
   dev:
     build: .
     init: true
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - .:/app
