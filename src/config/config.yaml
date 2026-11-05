@@ -1,7 +1,7 @@
 # Sampling preserves observed class proportions. Use null for a full validation/test set.
 
 mlflow:
-  tracking_uri: http://localhost:5050
+  tracking_uri: tracking_uri: http://10.17.0.238:5000
   experiment_name: flight-delay-severity
   model_name: flight-delay-classifier
 data:
