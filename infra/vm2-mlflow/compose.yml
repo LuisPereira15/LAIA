@@ -1,0 +1,12 @@
+services:
+  mlflow:
+    build: .
+    container_name: mlflow
+    ports:
+      - "${HOST_PORT}:${MLFLOW_PORT}" # O que chegar a porto do host é encaminhado para o porto do container
+    volumes:
+      - ./mlruns:/mlflow/artifacts
+      - ./data:/mlflow
+    env_file:
+      - .env
+    restart: unless-stopped
