@@ -14,4 +14,5 @@ CMD mlflow server \
     --port ${MLFLOW_PORT} \
     --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} \
     --artifacts-destination ${MLFLOW_ARTIFACTS_DESTINATION} \
+    --cors-allowed-origins ${MLFLOW_CORS_ALLOWED_ORIGINS} \
     --serve-artifacts
