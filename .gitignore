@@ -23,3 +23,6 @@ mlflow.db
 
 # Local training outputs (source of truth is MLflow)
 artifacts/training/
+
+# Example of config
+config.yml.example
