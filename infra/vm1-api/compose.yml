@@ -1,0 +1,11 @@
+services:
+  api:
+    build:
+      context: ../..                          # Repo root, so requirements.txt and src/ can be copied
+      dockerfile: infra/vm1-api/Dockerfile # Needs to be defined due to the context being the repo root
+    container_name: flight-api
+    ports:
+      - "${HOST_PORT}:${API_PORT}"            # Host port -> container port
+    env_file:
+      - .env
+    restart: unless-stopped
