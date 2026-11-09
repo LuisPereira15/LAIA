@@ -1,0 +1,40 @@
+name: 1 - Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  ci-check:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    runs-on: [self-hosted, linux, x64, training]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show runner information
+        run: |
+          echo "Runner is working"
+          echo "Hostname: $(hostname)"
+          echo "Architecture: $(uname -m)"
+          echo "Current directory: $(pwd)"
+
+      - name: Check Docker
+        run: |
+          docker --version
+          docker compose version
+
+      - name: List repository files
+        run: ls -la
