@@ -35,6 +35,13 @@ jobs:
         run: |
           docker --version
           docker compose version
+      
+      - name: Run unit tests
+        run: |
+          docker compose run --rm dev python -m pytest \
+            tests/test_train.py \
+            tests/test_api.py \
+            -v
 
       - name: List repository files
         run: ls -la
