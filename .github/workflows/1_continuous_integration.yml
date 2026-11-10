@@ -41,18 +41,25 @@ jobs:
           docker compose run --rm \
             --user "$(id -u):$(id -g)" \
             dev python -m pytest \
-            tests/test_train.py \
-            tests/test_api.py \
-            -v \
-            -p no:cacheprovider
+              tests/test_train.py \
+              tests/test_api.py \
+              -v \
+              -p no:cacheprovider
 
   build-images:
     needs: test-unit
 
     runs-on: [self-hosted, linux, x64, training]
 
+    permissions:
+      contents: read
+      packages: write
+
     env:
       COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      REGISTRY: ghcr.io
+      TRAINING_IMAGE: ghcr.io/luispereira15/laia-training
+      SERVING_IMAGE: ghcr.io/luispereira15/laia-serving
 
     steps:
       - name: Checkout repository
@@ -66,23 +73,39 @@ jobs:
         run: |
           docker build \
             -f infra/training/Dockerfile \
-            -t laia-training:$COMMIT_SHA \
+            --label "org.opencontainers.image.source=https://github.com/LuisPereira15/LAIA" \
+            -t $TRAINING_IMAGE:$COMMIT_SHA \
             .
 
       - name: Build serving image
         run: |
           docker build \
             -f infra/vm1-api/Dockerfile \
-            -t laia-serving:$COMMIT_SHA \
+            --label "org.opencontainers.image.source=https://github.com/LuisPereira15/LAIA" \
+            -t $SERVING_IMAGE:$COMMIT_SHA \
             .
 
       - name: Show built images
         run: |
-          docker image inspect laia-training:$COMMIT_SHA > /dev/null
-          docker image inspect laia-serving:$COMMIT_SHA > /dev/null
+          docker image inspect $TRAINING_IMAGE:$COMMIT_SHA > /dev/null
+          docker image inspect $SERVING_IMAGE:$COMMIT_SHA > /dev/null
 
           echo "Training image built successfully:"
-          docker image ls laia-training:$COMMIT_SHA
+          docker image ls $TRAINING_IMAGE:$COMMIT_SHA
 
           echo "Serving image built successfully:"
-          docker image ls laia-serving:$COMMIT_SHA
+          docker image ls $SERVING_IMAGE:$COMMIT_SHA
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push images to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push $TRAINING_IMAGE:$COMMIT_SHA
+          docker push $SERVING_IMAGE:$COMMIT_SHA
