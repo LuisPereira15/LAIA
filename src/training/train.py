@@ -434,10 +434,16 @@ def train_all_models(config: dict, commit_sha: str | None = None) -> dict:
         mlflow.log_text(json.dumps({'classifications': expected.tolist()}, indent=2), 'api_response_example.json')
         version = mlflow.register_model(info.model_uri, config['mlflow']['model_name'])
         client = MlflowClient()
-        for alias in ['staging', f'commit-{commit}']:
-            client.set_registered_model_alias(config['mlflow']['model_name'], alias, version.version)
+        commit_alias = f'commit-{commit}'
+
+        client.set_registered_model_alias(
+            config['mlflow']['model_name'],
+            commit_alias,
+            version.version,
+        )
+
         summary['registered_version'] = version.version
-        summary['aliases'] = ['staging', f'commit-{commit}']
+        summary['aliases'] = [commit_alias]
         mlflow.log_dict(summary, 'training_summary.json')
         out = PROJECT_ROOT / config['training']['output_dir'] / final_run_id
         out.mkdir(parents=True, exist_ok=True)
