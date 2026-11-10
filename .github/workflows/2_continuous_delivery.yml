@@ -1,0 +1,74 @@
+name: 2 - Continuous Delivery
+
+on:
+  workflow_run:
+    workflows:
+      - "1 - Continuous Integration"
+    types:
+      - completed
+
+jobs:
+  train-model:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    runs-on: [self-hosted, linux, x64, training]
+
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+      TRAINING_IMAGE: ghcr.io/luispereira15/laia-training
+      DATASET_PATH: /home/admin/laia-data/cleaned_flights_data.csv
+      MLFLOW_TRACKING_URI: http://host.docker.internal:5000
+
+    steps:
+      - name: Show delivery information
+        run: |
+          echo "Continuous Delivery started"
+          echo "Commit SHA: $COMMIT_SHA"
+          echo "Training image: $TRAINING_IMAGE:$COMMIT_SHA"
+          echo "Dataset: $DATASET_PATH"
+          echo "MLflow: $MLFLOW_TRACKING_URI"
+
+      - name: Check dataset
+        run: |
+          if [ ! -f "$DATASET_PATH" ]; then
+            echo "Dataset not found at $DATASET_PATH"
+            exit 1
+          fi
+
+          echo "Dataset found:"
+          ls -lh "$DATASET_PATH"
+
+      - name: Check MLflow
+        run: |
+          curl --fail --silent --show-error \
+            http://localhost:5000/ > /dev/null
+
+          echo "MLflow is reachable"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull training image
+        run: |
+          docker pull $TRAINING_IMAGE:$COMMIT_SHA
+
+      - name: Train model
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -v "$DATASET_PATH:/data/cleaned_flights_data.csv:ro" \
+            -e COMMIT_SHA="$COMMIT_SHA" \
+            -e DATA_PATH="/data/cleaned_flights_data.csv" \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            $TRAINING_IMAGE:$COMMIT_SHA
