@@ -8,7 +8,7 @@ on:
       - completed
 
 jobs:
-  train-model:
+  continuous-delivery:
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
@@ -18,13 +18,20 @@ jobs:
 
     permissions:
       contents: read
-      packages: read
+      packages: write
 
     env:
       COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+
       TRAINING_IMAGE: ghcr.io/luispereira15/laia-training
+      SERVING_IMAGE: ghcr.io/luispereira15/laia-serving
+
       DATASET_PATH: /home/admin/laia-data/cleaned_flights_data.csv
+
       MLFLOW_TRACKING_URI: http://host.docker.internal:5000
+      MLFLOW_MODEL_NAME: flight-delay-classifier
+
+      SERVING_CONTAINER: laia-serving-cd
 
     steps:
       - name: Show delivery information
@@ -32,8 +39,14 @@ jobs:
           echo "Continuous Delivery started"
           echo "Commit SHA: $COMMIT_SHA"
           echo "Training image: $TRAINING_IMAGE:$COMMIT_SHA"
+          echo "Serving image: $SERVING_IMAGE:$COMMIT_SHA"
           echo "Dataset: $DATASET_PATH"
           echo "MLflow: $MLFLOW_TRACKING_URI"
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Check dataset
         run: |
@@ -72,3 +85,85 @@ jobs:
             -e DATA_PATH="/data/cleaned_flights_data.csv" \
             -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
             $TRAINING_IMAGE:$COMMIT_SHA
+
+      - name: Pull serving image
+        run: |
+          docker pull $SERVING_IMAGE:$COMMIT_SHA
+
+      - name: Remove previous test serving container
+        run: |
+          docker rm -f "$SERVING_CONTAINER" 2>/dev/null || true
+
+      - name: Start serving container
+        run: |
+          docker run -d \
+            --name "$SERVING_CONTAINER" \
+            --add-host host.docker.internal:host-gateway \
+            -p 8000:8000 \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            -e MLFLOW_MODEL_NAME="$MLFLOW_MODEL_NAME" \
+            -e MODEL_ALIAS="commit-$COMMIT_SHA" \
+            -e API_MAX_INSTANCES="100000" \
+            -e API_BATCH_SIZE="10000" \
+            -e API_PORT="8000" \
+            $SERVING_IMAGE:$COMMIT_SHA
+
+      - name: Wait for API
+        run: |
+          echo "Waiting for API..."
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent \
+              http://localhost:8000/health > /dev/null; then
+
+              echo "API is ready"
+              curl http://localhost:8000/health
+              exit 0
+            fi
+
+            echo "Attempt $i/30 - API not ready yet"
+            sleep 2
+          done
+
+          echo "API did not become ready"
+          docker logs "$SERVING_CONTAINER"
+          exit 1
+
+      - name: Run end-to-end tests
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -w /workspace \
+            -e API_URL="http://host.docker.internal:8000" \
+            $TRAINING_IMAGE:$COMMIT_SHA \
+            python -m pytest \
+              tests/test_e2e.py \
+              -v \
+              -p no:cacheprovider
+
+      - name: Tag serving image as staging
+        run: |
+          docker tag \
+            $SERVING_IMAGE:$COMMIT_SHA \
+            $SERVING_IMAGE:staging
+
+      - name: Push staging serving image
+        run: |
+          docker push $SERVING_IMAGE:staging
+
+      - name: Promote model to staging
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            -e MLFLOW_MODEL_NAME="$MLFLOW_MODEL_NAME" \
+            -e FROM_ALIAS="commit-$COMMIT_SHA" \
+            -e TO_ALIAS="staging" \
+            $TRAINING_IMAGE:$COMMIT_SHA \
+            python -m src.model_promotion.promote_model
+
+      - name: Stop serving container
+        if: always()
+        run: |
+          docker rm -f "$SERVING_CONTAINER" 2>/dev/null || true
