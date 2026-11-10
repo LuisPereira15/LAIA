@@ -15,4 +15,5 @@ CMD mlflow server \
     --backend-store-uri ${MLFLOW_BACKEND_STORE_URI} \
     --artifacts-destination ${MLFLOW_ARTIFACTS_DESTINATION} \
     --cors-allowed-origins ${MLFLOW_CORS_ALLOWED_ORIGINS} \
+    --allowed-hosts "localhost:*,127.0.0.1:*,host.docker.internal:*" \
     --serve-artifacts
