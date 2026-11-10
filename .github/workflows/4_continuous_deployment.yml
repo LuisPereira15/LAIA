@@ -1,25 +1,96 @@
 name: 4 - Continuous Deployment
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "3 - Continuous Staging"
+    types:
+      - completed
 
 jobs:
-  validate-deployment-runner:
+  continuous-deployment:
+    if: >
+      github.event.workflow_run.conclusion == 'success'
+
     runs-on: [self-hosted, linux, x64, deployment]
 
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      SERVING_IMAGE: ghcr.io/luispereira15/laia-serving
+      PRODUCTION_CONTAINER: flight-api
+
+      MLFLOW_TRACKING_URI: http://10.17.0.238:5000
+      MLFLOW_MODEL_NAME: flight-delay-classifier
+
     steps:
-      - name: Show runner information
+      - name: Show deployment information
         run: |
-          echo "Deployment runner is working"
-          echo "Hostname: $(hostname)"
-          echo "Architecture: $(uname -m)"
-          echo "Current directory: $(pwd)"
+          echo "Continuous Deployment started"
+          echo "Runner: $(hostname)"
+          echo "Serving image: $SERVING_IMAGE:production"
+          echo "MLflow: $MLFLOW_TRACKING_URI"
 
       - name: Check Docker
         run: |
           docker --version
           docker compose version
 
-      - name: Show running containers
+      - name: Check MLflow
         run: |
-          docker ps
+          curl --fail --silent --show-error \
+            http://10.17.0.238:5000/ > /dev/null
+
+          echo "MLflow is reachable from deployment VM"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull production serving image
+        run: |
+          docker pull $SERVING_IMAGE:production
+
+      - name: Remove previous production container
+        run: |
+          docker rm -f "$PRODUCTION_CONTAINER" 2>/dev/null || true
+
+      - name: Start production container
+        run: |
+          docker run -d \
+            --name "$PRODUCTION_CONTAINER" \
+            --restart unless-stopped \
+            -p 8000:8000 \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            -e MLFLOW_MODEL_NAME="$MLFLOW_MODEL_NAME" \
+            -e MODEL_ALIAS="production" \
+            -e API_MAX_INSTANCES="100000" \
+            -e API_BATCH_SIZE="10000" \
+            -e API_PORT="8000" \
+            $SERVING_IMAGE:production
+
+      - name: Wait for production API
+        run: |
+          echo "Waiting for production API..."
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent \
+              http://localhost:8000/health > /dev/null; then
+
+              echo "Production API is ready"
+              curl http://localhost:8000/health
+              exit 0
+            fi
+
+            echo "Attempt $i/30 - production API not ready yet"
+            sleep 2
+          done
+
+          echo "Production API did not become ready"
+          docker logs "$PRODUCTION_CONTAINER"
+          exit 1
