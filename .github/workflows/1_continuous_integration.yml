@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  ci-check:
+  test-unit:
     if: >
       github.event_name == 'push' ||
       github.event_name == 'workflow_dispatch' ||
@@ -35,13 +35,54 @@ jobs:
         run: |
           docker --version
           docker compose version
-      
+
       - name: Run unit tests
         run: |
-          docker compose run --rm dev python -m pytest \
+          docker compose run --rm \
+            --user "$(id -u):$(id -g)" \
+            dev python -m pytest \
             tests/test_train.py \
             tests/test_api.py \
-            -v
+            -v \
+            -p no:cacheprovider
 
-      - name: List repository files
-        run: ls -la
+  build-images:
+    needs: test-unit
+
+    runs-on: [self-hosted, linux, x64, training]
+
+    env:
+      COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show image tag
+        run: |
+          echo "Building Docker images for commit: $COMMIT_SHA"
+
+      - name: Build training image
+        run: |
+          docker build \
+            -f infra/training/Dockerfile \
+            -t laia-training:$COMMIT_SHA \
+            .
+
+      - name: Build serving image
+        run: |
+          docker build \
+            -f infra/vm1-api/Dockerfile \
+            -t laia-serving:$COMMIT_SHA \
+            .
+
+      - name: Show built images
+        run: |
+          docker image inspect laia-training:$COMMIT_SHA > /dev/null
+          docker image inspect laia-serving:$COMMIT_SHA > /dev/null
+
+          echo "Training image built successfully:"
+          docker image ls laia-training:$COMMIT_SHA
+
+          echo "Serving image built successfully:"
+          docker image ls laia-serving:$COMMIT_SHA
