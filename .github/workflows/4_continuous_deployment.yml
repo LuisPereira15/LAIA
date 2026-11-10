@@ -1,0 +1,25 @@
+name: 4 - Continuous Deployment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-deployment-runner:
+    runs-on: [self-hosted, linux, x64, deployment]
+
+    steps:
+      - name: Show runner information
+        run: |
+          echo "Deployment runner is working"
+          echo "Hostname: $(hostname)"
+          echo "Architecture: $(uname -m)"
+          echo "Current directory: $(pwd)"
+
+      - name: Check Docker
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Show running containers
+        run: |
+          docker ps
