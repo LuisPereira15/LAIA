@@ -38,10 +38,13 @@ jobs:
 
       - name: Run unit tests
         run: |
-          docker compose run --rm dev python -m pytest \
+          docker compose run --rm \
+            --user "$(id -u):$(id -g)" \
+            dev python -m pytest \
             tests/test_train.py \
             tests/test_api.py \
-            -v
+            -v \
+            -p no:cacheprovider
 
   build-images:
     needs: test-unit
