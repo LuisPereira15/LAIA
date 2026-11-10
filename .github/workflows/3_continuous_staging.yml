@@ -1,0 +1,135 @@
+name: 3 - Continuous Staging
+
+on:
+  workflow_run:
+    workflows:
+      - "2 - Continuous Delivery"
+    types:
+      - completed
+
+jobs:
+  continuous-staging:
+    if: >
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: [self-hosted, linux, x64, training]
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      SERVING_IMAGE: ghcr.io/luispereira15/laia-serving
+
+      MLFLOW_TRACKING_URI: http://host.docker.internal:5000
+      MLFLOW_MODEL_NAME: flight-delay-classifier
+
+      STAGING_CONTAINER: laia-serving-staging-ci
+
+    steps:
+      - name: Show staging information
+        run: |
+          echo "Continuous Staging started"
+          echo "Serving image: $SERVING_IMAGE:staging"
+          echo "MLflow: $MLFLOW_TRACKING_URI"
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Check MLflow
+        run: |
+          curl --fail --silent --show-error \
+            http://localhost:5000/ > /dev/null
+
+          echo "MLflow is reachable"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull staging serving image
+        run: |
+          docker pull $SERVING_IMAGE:staging
+
+      - name: Remove previous staging test container
+        run: |
+          docker rm -f "$STAGING_CONTAINER" 2>/dev/null || true
+
+      - name: Start staging serving container
+        run: |
+          docker run -d \
+            --name "$STAGING_CONTAINER" \
+            --add-host host.docker.internal:host-gateway \
+            -p 8001:8000 \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            -e MLFLOW_MODEL_NAME="$MLFLOW_MODEL_NAME" \
+            -e MODEL_ALIAS="staging" \
+            -e API_MAX_INSTANCES="100000" \
+            -e API_BATCH_SIZE="10000" \
+            -e API_PORT="8000" \
+            $SERVING_IMAGE:staging
+
+      - name: Wait for staging API
+        run: |
+          echo "Waiting for staging API..."
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent \
+              http://localhost:8001/health > /dev/null; then
+
+              echo "Staging API is ready"
+              curl http://localhost:8001/health
+              exit 0
+            fi
+
+            echo "Attempt $i/30 - staging API not ready yet"
+            sleep 2
+          done
+
+          echo "Staging API did not become ready"
+          docker logs "$STAGING_CONTAINER"
+          exit 1
+
+      - name: Run staging end-to-end tests
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -w /workspace \
+            -e API_URL="http://host.docker.internal:8001" \
+            ghcr.io/luispereira15/laia-training:${{ github.event.workflow_run.head_sha }} \
+            python -m pytest \
+              tests/test_e2e.py \
+              -v \
+              -p no:cacheprovider
+
+      - name: Tag serving image as production
+        run: |
+          docker tag \
+            $SERVING_IMAGE:staging \
+            $SERVING_IMAGE:production
+
+      - name: Push production serving image
+        run: |
+          docker push $SERVING_IMAGE:production
+
+      - name: Promote model to production
+        run: |
+          docker run --rm \
+            --add-host host.docker.internal:host-gateway \
+            -e MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" \
+            -e MLFLOW_MODEL_NAME="$MLFLOW_MODEL_NAME" \
+            -e FROM_ALIAS="staging" \
+            -e TO_ALIAS="production" \
+            ghcr.io/luispereira15/laia-training:${{ github.event.workflow_run.head_sha }} \
+            python -m src.model_promotion.promote_model
+
+      - name: Stop staging serving container
+        if: always()
+        run: |
+          docker rm -f "$STAGING_CONTAINER" 2>/dev/null || true
