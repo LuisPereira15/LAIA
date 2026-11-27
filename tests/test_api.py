@@ -1,3 +1,10 @@
+"""Unit tests for the inference API's robust /classify and /labels contract.
+
+The API is built to never reject a batch: missing, null or invalid fields are
+imputed, and any instance the model cannot score falls back to a default label.
+These tests pin that behaviour down.
+"""
+
 import os
 
 # The API settings are created when src.api.main is imported.
@@ -12,8 +19,10 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.main import app
+from src.api.main import FALLBACK_LABEL, app
 from src.api.settings import settings
+
+VALID_LABELS = {"on_time", "moderate_delay", "severe_delay"}
 
 
 class FakeModel:
@@ -25,12 +34,8 @@ class FakeModel:
             "JFK": "moderate_delay",
             "ORD": "severe_delay",
         }
-
         return np.array(
-            [
-                predictions_by_origin.get(origin, "on_time")
-                for origin in frame["ORIGIN"]
-            ]
+            [predictions_by_origin.get(origin, "on_time") for origin in frame["ORIGIN"]]
         )
 
 
@@ -73,15 +78,9 @@ def test_health_reports_served_model(client):
     }
 
 
-def test_classify_returns_one_prediction_per_instance_in_order(
-    client,
-    valid_instance,
-):
-    second = valid_instance.copy()
-    second["ORIGIN"] = "JFK"
-
-    third = valid_instance.copy()
-    third["ORIGIN"] = "ORD"
+def test_classify_returns_one_prediction_per_instance_in_order(client, valid_instance):
+    second = valid_instance | {"ORIGIN": "JFK"}
+    third = valid_instance | {"ORIGIN": "ORD"}
 
     response = client.post(
         "/classify",
@@ -90,72 +89,126 @@ def test_classify_returns_one_prediction_per_instance_in_order(
 
     assert response.status_code == 200
     assert response.json() == {
-        "classifications": [
-            "on_time",
-            "moderate_delay",
-            "severe_delay",
-        ]
+        "classifications": ["on_time", "moderate_delay", "severe_delay"]
     }
 
 
-def test_classify_reports_ignored_extra_fields(client, valid_instance):
-    instance = valid_instance | {
-        "ARR_DELAY": 42.0,
-        "CANCELLED": 0,
-    }
-
+def test_classify_accepts_the_leaderboard_wrapper(client, valid_instance):
+    # request_id and mode are read, not rejected.
     response = client.post(
         "/classify",
-        json={"instances": [instance]},
+        json={"request_id": "r-1", "mode": "live", "instances": [valid_instance]},
     )
 
     assert response.status_code == 200
-    assert response.headers["X-Ignored-Fields"] == "ARR_DELAY, CANCELLED"
-    assert response.json() == {
-        "classifications": ["on_time"]
+    assert response.json() == {"classifications": ["on_time"]}
+
+
+def test_classify_accepts_and_ignores_extra_fields(client, valid_instance):
+    instance = valid_instance | {"ARR_DELAY": 42.0, "CANCELLED": 0, "TAIL_NUM": "N1"}
+
+    response = client.post("/classify", json={"instances": [instance]})
+
+    assert response.status_code == 200
+    assert response.json() == {"classifications": ["on_time"]}
+    assert "X-Ignored-Fields" not in response.headers
+
+
+def test_classify_empty_instances_returns_empty_list(client):
+    response = client.post("/classify", json={"instances": []})
+
+    assert response.status_code == 200
+    assert response.json() == {"classifications": []}
+
+
+def test_classify_missing_instances_key_returns_empty_list(client):
+    response = client.post("/classify", json={"request_id": "r", "mode": "live"})
+
+    assert response.status_code == 200
+    assert response.json() == {"classifications": []}
+
+
+def test_classify_imputes_invalid_distance(client, valid_instance):
+    invalid = valid_instance | {"DISTANCE": 0}
+
+    response = client.post("/classify", json={"instances": [invalid]})
+
+    # Imputed, not rejected: ORIGIN is still ATL, so the label is deterministic.
+    assert response.status_code == 200
+    assert response.json() == {"classifications": ["on_time"]}
+
+
+def test_classify_handles_nulls_and_missing_carrier(client):
+    # No OP_CARRIER_AIRLINE_ID, several nulls; only ORIGIN carries signal here.
+    instance = {
+        "FL_DATE": None,
+        "OP_UNIQUE_CARRIER": "AA",
+        "ORIGIN": "JFK",
+        "ORIGIN_STATE_ABR": None,
+        "DEST": "MIA",
+        "CRS_DEP_TIME": None,
+        "DISTANCE": None,
     }
 
+    response = client.post("/classify", json={"instances": [instance]})
 
-def test_classify_rejects_empty_instances(client):
+    assert response.status_code == 200
+    assert response.json() == {"classifications": ["moderate_delay"]}
+
+
+def test_classify_never_rejects_a_mixed_batch(client, valid_instance):
+    clean = valid_instance  # ORIGIN ATL -> on_time
+    all_null = {"FL_DATE": None, "ORIGIN": None, "DEST": None}  # ORIGIN UNK -> on_time
+    broken = {
+        "FL_DATE": "bad-date",
+        "OP_CARRIER_AIRLINE_ID": "AA",
+        "ORIGIN": "ORD",  # -> severe_delay
+        "CRS_DEP_TIME": 1470,
+        "DISTANCE": -5,
+    }
+
     response = client.post(
         "/classify",
-        json={"instances": []},
+        json={"mode": "live", "instances": [clean, all_null, broken]},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    labels = response.json()["classifications"]
+    assert len(labels) == 3
+    assert all(label in VALID_LABELS for label in labels)
+    assert labels == ["on_time", "on_time", "severe_delay"]
 
 
-def test_classify_rejects_non_positive_distance(
-    client,
-    valid_instance,
-):
-    invalid = valid_instance.copy()
-    invalid["DISTANCE"] = 0
-
-    response = client.post(
-        "/classify",
-        json={"instances": [invalid]},
-    )
-
-    assert response.status_code == 422
-
-
-def test_classify_converts_pipeline_value_error_to_422(
-    client,
-    valid_instance,
-):
+def test_classify_falls_back_when_model_fails(client, valid_instance):
     class RejectingModel:
         def predict(self, frame):
-            raise ValueError("invalid HHMM value")
+            raise ValueError("boom")
 
     app.state.model = RejectingModel()
 
-    response = client.post(
-        "/classify",
-        json={"instances": [valid_instance]},
-    )
+    response = client.post("/classify", json={"instances": [valid_instance]})
 
-    assert response.status_code == 422
-    assert response.json() == {
-        "detail": "invalid HHMM value"
+    # Never 422: an unscorable instance gets the fallback label.
+    assert response.status_code == 200
+    assert response.json() == {"classifications": [FALLBACK_LABEL]}
+
+
+def test_labels_accepts_outcomes_and_returns_200(client):
+    payload = {
+        "request_id": "r-1",
+        "mode": "live",
+        "labels": ["on_time", "severe_delay"],
+        "outcomes": {"ARR_DELAY": [3, 120], "TAXI_OUT": [12, 20]},
     }
+
+    response = client.post("/labels", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "received": 2}
+
+
+def test_labels_accepts_minimal_payload(client):
+    response = client.post("/labels", json={})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
