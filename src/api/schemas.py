@@ -1,61 +1,64 @@
-"""Request and response contracts for the /classify endpoint."""
+"""Request and response contracts for the /classify and /labels endpoints.
 
-from datetime import date
-from typing import Annotated, Literal
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from src.api.settings import settings
+The schema is deliberately permissive: the scoring service may send nulls,
+omit fields or add fields we do not use, and a single bad instance must never
+reject the whole batch. Everything is optional here; missing or invalid
+values are imputed in the API layer before prediction.
+"""
 
-# Non-empty text and whitespace
-NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+from typing import Any, Literal
 
-# Scheduled local time in HHMM format
-HHMM = Annotated[int, Field(ge=0, le=2400)]
+from pydantic import BaseModel, ConfigDict, Field
 
 DelayCategory = Literal['on_time', 'moderate_delay', 'severe_delay']
 
 
 class FlightInstance(BaseModel):
-    """One flight, described with the original BTS column names.
+    """One flight as sent by the leaderboard, with original BTS field names.
 
-    Only attributes known before the scheduled departure are accepted.
-    Extra columns are allowed so the API can report them as ignored.
+    Fields are declared only to document what the model consumes; all are
+    optional and untyped so no value can ever fail validation.
     """
 
-    # Allow extra columns to be present in the request, but ignore them in the model
     model_config = ConfigDict(extra='allow')
 
-    FL_DATE: date = Field(description='Flight date, YYYY-MM-DD')
-    OP_CARRIER_AIRLINE_ID: int = Field(gt=0, description='Operating airline identifier')
-    ORIGIN: NonEmptyStr = Field(description='Origin airport code, e.g. ATL')
-    ORIGIN_STATE_ABR: NonEmptyStr = Field(description='Origin state, e.g. GA')
-    DEST: NonEmptyStr = Field(description='Destination airport code')
-    DEST_STATE_ABR: NonEmptyStr = Field(description='Destination state')
-    CRS_DEP_TIME: HHMM = Field(description='Scheduled departure time, HHMM')
-    CRS_ARR_TIME: HHMM = Field(description='Scheduled arrival time, HHMM')
-    DISTANCE: float = Field(gt=0, description='Distance in miles')
+    FL_DATE: Any = None
+    OP_CARRIER_AIRLINE_ID: Any = None
+    ORIGIN: Any = None
+    ORIGIN_STATE_ABR: Any = None
+    DEST: Any = None
+    DEST_STATE_ABR: Any = None
+    CRS_DEP_TIME: Any = None
+    CRS_ARR_TIME: Any = None
+    DISTANCE: Any = None
 
 
 class ClassifyRequest(BaseModel):
-    """Batch of flights to classify."""
+    """A batch of flights to classify, as sent by the leaderboard."""
 
-    # Number of instances is limited to avoid memory issues.
-    instances: list[FlightInstance] = Field(min_length=1, max_length=settings.max_instances)
+    model_config = ConfigDict(extra='allow')
 
-    # The model_config is used to provide an example of a valid request in the API
-    model_config = ConfigDict(json_schema_extra={'examples': [{'instances': [{
-        'FL_DATE': '2025-05-15',
-        'OP_CARRIER_AIRLINE_ID': 19805,
-        'ORIGIN': 'ATL',
-        'ORIGIN_STATE_ABR': 'GA',
-        'DEST': 'LAX',
-        'DEST_STATE_ABR': 'CA',
-        'CRS_DEP_TIME': 1430,
-        'CRS_ARR_TIME': 1615,
-        'DISTANCE': 1946.0,
-    }]}]})
+    request_id: str | None = None
+    mode: str | None = None
+    instances: list[FlightInstance] = Field(default_factory=list)
 
 
 class ClassifyResponse(BaseModel):
     """One delay category per input flight, in the same order as the request."""
 
     classifications: list[DelayCategory]
+
+
+class LabelsRequest(BaseModel):
+    """True outcomes delivered by the leaderboard after scoring.
+
+    Accepts any shape; the endpoint only needs to acknowledge it with HTTP 200
+    and keep it (by mode) for monitoring and drift detection.
+    """
+
+    model_config = ConfigDict(extra='allow')
+
+    request_id: str | None = None
+    mode: str | None = None
+    labels: list[Any] | None = None
+    outcomes: Any = None
