@@ -7,10 +7,14 @@ instance the model still cannot score falls back to a default label. Every
 request therefore returns exactly one valid label per instance.
 """
 
+import asyncio
+import json
 import logging
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 import mlflow
 import mlflow.sklearn
@@ -47,6 +51,37 @@ DEFAULTS: dict[str, object] = {
     'DISTANCE': 800.0,
 }
 
+# --- Debug-only raw-request capture ----------------------------------------
+# Writes the first N bodies received at /classify and /labels to a JSONL file,
+# so we can inspect what the leaderboard actually sends without touching the
+# scoring hot path. Gated by settings.capture_raw_requests.
+CAPTURE_DIR = Path('/app/logs/raw_requests')
+CAPTURE_PATHS = ('/classify', '/labels')
+_capture_counters: dict[str, int] = {path: 0 for path in CAPTURE_PATHS}
+_capture_lock = threading.Lock()
+
+
+def _write_capture(path: str, body_bytes: bytes, client_ip: str) -> None:
+    """Append one JSONL record with the raw body. Runs in a worker thread."""
+    try:
+        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        out_file = CAPTURE_DIR / f'{today}.jsonl'
+        try:
+            body = json.loads(body_bytes.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body = {'_unparsed_preview': body_bytes[:4096].decode('utf-8', errors='replace')}
+        record = {
+            'ts': datetime.now(timezone.utc).isoformat(),
+            'path': path,
+            'ip': client_ip,
+            'body': body,
+        }
+        with out_file.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except Exception:
+        logger.exception('Failed to persist raw capture for %s', path)
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -62,6 +97,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title='Flight Delay Severity API', version='2.0.0', lifespan=lifespan)
+
+@app.middleware('http')
+async def capture_raw_body(request: Request, call_next):
+    """Save the first N raw bodies of /classify and /labels for debugging.
+
+    The body is read before the handler runs; Starlette caches it so the
+    downstream handler can still parse it with Pydantic. Writing to disk is
+    offloaded to a worker thread and fire-and-forget: a capture failure must
+    never block or slow the scoring path.
+    """
+    path = request.url.path
+    should_capture = (
+        settings.capture_raw_requests
+        and path in _capture_counters
+    )
+    if should_capture:
+        with _capture_lock:
+            slot_taken = _capture_counters[path] < settings.capture_raw_max
+            if slot_taken:
+                _capture_counters[path] += 1
+        if slot_taken:
+            try:
+                body_bytes = await request.body()
+                client_ip = request.client.host if request.client else 'unknown'
+                asyncio.create_task(
+                    asyncio.to_thread(_write_capture, path, body_bytes, client_ip)
+                )
+            except Exception:
+                logger.exception('Failed to read raw body for %s', path)
+    return await call_next(request)
 
 
 def clean_value(field: str, raw: object) -> object:

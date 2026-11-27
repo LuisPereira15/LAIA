@@ -26,3 +26,6 @@ artifacts/training/
 
 # Example of config
 config.yml.example
+
+# Logs of API requests (raw request captures)
+infra/vm1-api/logs/

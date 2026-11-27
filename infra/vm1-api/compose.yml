@@ -8,4 +8,6 @@ services:
       - "${HOST_PORT}:${API_PORT}"            # Host port -> container port
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs                      # Debug raw-request captures (off unless CAPTURE_RAW_REQUESTS=1)
     restart: unless-stopped
